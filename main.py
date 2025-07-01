@@ -121,7 +121,7 @@ def render_scene(scene: SceneInput) -> (str, List[str]):
         video_clip = ImageClip(image_path).with_duration(scene.duration)
         video_clip = video_clip.resized(new_size=(base_width, base_height))
         # Apply Ken Burns zoom-in effect (from 100% to 110%)
-        video_clip = video_clip.resized(lambda t: 1.0 + 0.1 * (t / scene.duration))
+        video_clip = video_clip.resized(lambda t: 1.0 + 0.5 * (t / scene.duration))
         # Center in REEL_SIZE frame
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
         logger.info(f"Created ImageClip for {image_path} with REEL_SIZE and zoom-in effect")

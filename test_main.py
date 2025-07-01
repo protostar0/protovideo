@@ -3,6 +3,7 @@ import tempfile
 from fastapi.testclient import TestClient
 from main import app
 from pathlib import Path
+import uuid
 
 client = TestClient(app)
 
@@ -42,46 +43,47 @@ def test_generate_image_scene_with_invalid_url():
 def test_generate_real_image_scene(tmp_path):
     # Use a public domain image (e.g., Wikimedia Commons)
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/320px-Example.jpg"
+    unique_filename = f"trading_psychology_mindset_{uuid.uuid4().hex}.mp4"
     payload = {
-  "output_filename": "trading_psychology_mindset.mp4",
-  "scenes": [
-    {
-      "type": "image",
-      "image": "https://images.pexels.com/photos/210607/pexels-photo-210607.jpeg",
-      "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
-      "duration": 6,
-      "text": {
-        "content": "Master Your Mind",
-        "position": "center",
-        "fontsize": 48,
-        "color": "white"
-      }
-    },    {
-      "type": "image",
-      "image": "https://pixabay.com/get/g6629f1c191a40528b5d3c52ecd480f03c1ebf8e1283c5ebd88f9901136da5f50d1b427bf7a6edaeb4bb689e429f1b072adfdb750f417803e4978430d1b0c47dc_1280.jpg",
-      "narration_text": "Discipline and patience are key traits of successful traders. Stick to your strategy, even when the market tests your resolve.",
-      "duration": 6,
-      "text": {
-        "content": "Discipline Over Impulse",
-        "position": "bottom",
-        "fontsize": 44,
-        "color": "yellow"
-      }
-    },
-    {
-      "type": "video",
-      "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
-      "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
-      "duration": 8,
-      "text": {
-        "content": "Stay Calm, Trade Smart",
-        "position": "top",
-        "fontsize": 42,
-        "color": "lightblue"
-      }
-    },
-  ]
-}
+      "output_filename": unique_filename,
+      "scenes": [
+        {
+          "type": "image",
+          "image": "https://images.pexels.com/photos/210607/pexels-photo-210607.jpeg",
+          "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
+          "duration": 6,
+          "text": {
+            "content": "Master Your Mind",
+            "position": "center",
+            "fontsize": 48,
+            "color": "white"
+          }
+        },    {
+          "type": "image",
+          "image": "https://pixabay.com/get/g6629f1c191a40528b5d3c52ecd480f03c1ebf8e1283c5ebd88f9901136da5f50d1b427bf7a6edaeb4bb689e429f1b072adfdb750f417803e4978430d1b0c47dc_1280.jpg",
+          "narration_text": "Discipline and patience are key traits of successful traders. Stick to your strategy, even when the market tests your resolve.",
+          "duration": 6,
+          "text": {
+            "content": "Discipline Over Impulse",
+            "position": "bottom",
+            "fontsize": 44,
+            "color": "yellow"
+          }
+        },
+        {
+          "type": "video",
+          "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
+          "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
+          "duration": 8,
+          "text": {
+            "content": "Stay Calm, Trade Smart",
+            "position": "top",
+            "fontsize": 42,
+            "color": "lightblue"
+          }
+        },
+      ]
+    }
 
     response = client.post("/generate", json=payload)
     assert response.status_code == 200
@@ -93,7 +95,7 @@ def test_generate_real_image_scene(tmp_path):
     assert download_response.status_code == 200
     assert download_response.headers["content-type"] == "video/mp4"
     # Save to temp file and check size
-    video_path = tmp_path / "test_real_video2.mp4"
+    video_path = tmp_path / f"test_real_video_{uuid.uuid4().hex}.mp4"
     with open(video_path, "wb") as f:
         f.write(download_response.content)
     assert os.path.getsize(video_path) > 1000  # Should be a non-trivial file
