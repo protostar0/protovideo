@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+moviepy
+gtts
+aiofiles
+python-multipart
+requests
+pytest 
