@@ -14,6 +14,7 @@ from moviepy import (
 )
 from gtts import gTTS
 import requests
+from moviepy import AudioClip
 
 # --- Logging setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -170,7 +171,18 @@ def render_scene(scene: SceneInput) -> (str, List[str]):
         temp_files.append(narration_path)
         logger.info(f"Added narration from text: {narration_path}")
     if narration_path:
-        audio_clips.append(AudioFileClip(narration_path).with_duration(scene.duration))
+        narration_clip = AudioFileClip(narration_path)
+        if narration_clip.duration < video_clip.duration:
+            # Pad with silence
+            silence = AudioClip(lambda t: 0, duration=video_clip.duration - narration_clip.duration)
+            narration_padded = CompositeAudioClip([
+                narration_clip,
+                silence.with_start(narration_clip.duration)
+            ])
+            narration_padded = narration_padded.with_duration(video_clip.duration)
+        else:
+            narration_padded = narration_clip.subclipped(0, video_clip.duration)
+        video_clip = video_clip.with_audio(narration_padded)
     # Handle music
     if scene.music:
         music_path = download_asset(scene.music)
