@@ -68,6 +68,18 @@ def test_generate_real_image_scene(tmp_path):
         "color": "yellow"
       }
     },
+    {
+      "type": "video",
+      "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
+      "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
+      "duration": 8,
+      "text": {
+        "content": "Stay Calm, Trade Smart",
+        "position": "top",
+        "fontsize": 42,
+        "color": "lightblue"
+      }
+    },
   ]
 }
 
