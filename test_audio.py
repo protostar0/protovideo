@@ -20,23 +20,7 @@ model = ChatterboxTTS.from_pretrained(device=device)
 
 text = """Everyone wants the perfect strategy...
 But they forget the mind behind it."
-
-"You can master charts, indicators, and news.
-But if you can't master your emotions?
-You’ll lose to fear, greed, and doubt."
-
-"Successful traders aren’t just skilled...
-They're disciplined. Calm. Focused."
-
-"They don’t chase. They don’t panic.
-They stick to the plan — no matter what."
-
-"Because in the end...
-It's not the market you have to beat.
-It’s yourself."
-
-"Master your mindset —
-and the profits will follow."""
+"""
 # If you want to synthesize with a different voice, specify the audio prompt
 # AUDIO_PROMPT_PATH = "YOUR_FILE.wav"
 wav = model.generate(
@@ -45,4 +29,4 @@ wav = model.generate(
     exaggeration=5.0,
     cfg_weight=0.5
     )
-ta.save("test-4.wav", wav, model.sr)
+ta.save("test-4.mp3", wav, model.sr)

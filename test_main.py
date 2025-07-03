@@ -46,42 +46,45 @@ def test_generate_real_image_scene(tmp_path):
     unique_filename = f"trading_psychology_mindset_{uuid.uuid4().hex}.mp4"
     payload = {
       "output_filename": unique_filename,
+    #   "narration_text": "Trading is not just about numbers and charts; it's a journey of self-discovery and discipline. Every successful trader knows that the real battle is not with the market, but with their own emotions. Patience, resilience, and a calm mind are the true assets that separate winners from losers. When you feel the urge to chase a trade or panic in the face of a loss, remember that your mindset is your greatest tool. Take a deep breath, stick to your plan, and trust the process. Over time, consistency and emotional control will yield results far greater than any single winning trade. The market rewards those who can remain focused and composed, even when volatility strikes. So, invest in your mindset, learn from every experience, and never stop growing. Success in trading is a marathon, not a sprint. Stay disciplined, stay patient, and let your mindset lead the way to lasting profits.",
+      "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
+
       "scenes": [
         {
           "type": "image",
           "image": "https://images.pexels.com/photos/210607/pexels-photo-210607.jpeg",
           "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
           "duration": 6,
-          "text": {
-            "content": "Master Your Mind",
-            "position": "center",
-            "fontsize": 48,
-            "color": "white"
-          }
+        #   "text": {
+        #     "content": "Master Your Mind",
+        #     "position": "center",
+        #     "fontsize": 48,
+        #     "color": "white"
+        #   }
         },    {
           "type": "image",
-          "image": "https://pixabay.com/get/g6629f1c191a40528b5d3c52ecd480f03c1ebf8e1283c5ebd88f9901136da5f50d1b427bf7a6edaeb4bb689e429f1b072adfdb750f417803e4978430d1b0c47dc_1280.jpg",
-          "narration_text": "Discipline and patience are key traits of successful traders. Stick to your strategy, even when the market tests your resolve.",
+          "image": "https://images.pexels.com/photos/730564/pexels-photo-730564.jpeg",
+        #   "narration_text": "Discipline and patience are key traits of successful traders. Stick to your strategy, even when the market tests your resolve.",
           "duration": 6,
-          "text": {
-            "content": "Discipline Over Impulse",
-            "position": "bottom",
-            "fontsize": 44,
-            "color": "yellow"
-          }
+        #   "text": {
+        #     "content": "Discipline Over Impulse",
+        #     "position": "bottom",
+        #     "fontsize": 44,
+        #     "color": "yellow"
+        #   }
         },
-        {
-          "type": "video",
-          "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
-          "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
-          "duration": 8,
-          "text": {
-            "content": "Stay Calm, Trade Smart",
-            "position": "top",
-            "fontsize": 42,
-            "color": "lightblue"
-          }
-        },
+        # {
+        #   "type": "video",
+        #   "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
+        # #   "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
+        #   "duration": 8,
+        #   "text": {
+        #     "content": "Stay Calm, Trade Smart",
+        #     "position": "top",
+        #     "fontsize": 42,
+        #     "color": "lightblue"
+        #   }
+        # },
       ]
     }
 
