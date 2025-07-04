@@ -4,7 +4,8 @@ from fastapi.testclient import TestClient
 from main import app
 from pathlib import Path
 import uuid
-
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 client = TestClient(app)
 
 def test_root():
@@ -45,48 +46,32 @@ def test_generate_real_image_scene(tmp_path):
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a9/Example.jpg/320px-Example.jpg"
     unique_filename = f"trading_psychology_mindset_{uuid.uuid4().hex}.mp4"
     payload = {
-      "output_filename": unique_filename,
-    #   "narration_text": "Trading is not just about numbers and charts; it's a journey of self-discovery and discipline. Every successful trader knows that the real battle is not with the market, but with their own emotions. Patience, resilience, and a calm mind are the true assets that separate winners from losers. When you feel the urge to chase a trade or panic in the face of a loss, remember that your mindset is your greatest tool. Take a deep breath, stick to your plan, and trust the process. Over time, consistency and emotional control will yield results far greater than any single winning trade. The market rewards those who can remain focused and composed, even when volatility strikes. So, invest in your mindset, learn from every experience, and never stop growing. Success in trading is a marathon, not a sprint. Stay disciplined, stay patient, and let your mindset lead the way to lasting profits.",
-      "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
+            "output_filename": "trading_mindset_reel.mp4",
+                "narration_text": "Success in trading doesn’t come from knowing every chart pattern or market signal. It comes from controlling your emotions, staying calm under pressure, and making disciplined decisions — even when everything feels uncertain. The market is unpredictable, but your mindset doesn’t have to be. When others panic, breathe. When others chase, wait. The traders who win long-term aren’t the ones who react — they’re the ones who plan, stay focused, and execute with confidence. Master your emotions, trust your process, and let your mindset become your greatest edge.",
+            "scenes": [
+                {
+                "type": "image",
+                "image": "https://images.pexels.com/photos/30572214/pexels-photo-30572214.jpeg",
+                "duration": 6
+                },
+                {
+                "type": "image",
+                "image": "https://images.pexels.com/photos/17977092/pexels-photo-17977092.jpeg",
+                "duration": 6
+                },
+                {
+                "type": "image",
+                "image": "https://images.pexels.com/photos/30572264/pexels-photo-30572264.jpeg",
+                "duration": 6
+                },
+                {
+                "type": "image",
+                "image": "https://images.pexels.com/photos/14751274/pexels-photo-14751274.jpeg",
+                "duration": 6
+                }
+            ]
+            }
 
-      "scenes": [
-        {
-          "type": "image",
-          "image": "https://images.pexels.com/photos/210607/pexels-photo-210607.jpeg",
-          "narration_text": "Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
-          "duration": 6,
-        #   "text": {
-        #     "content": "Master Your Mind",
-        #     "position": "center",
-        #     "fontsize": 48,
-        #     "color": "white"
-        #   }
-        },    {
-          "type": "image",
-          "image": "https://images.pexels.com/photos/730564/pexels-photo-730564.jpeg",
-        #   "narration_text": "Discipline and patience are key traits of successful traders. Stick to your strategy, even when the market tests your resolve.",
-          "duration": 6,
-        #   "text": {
-        #     "content": "Discipline Over Impulse",
-        #     "position": "bottom",
-        #     "fontsize": 44,
-        #     "color": "yellow"
-        #   }
-        },
-        # {
-        #   "type": "video",
-        #   "video": "https://cdn.pixabay.com/video/2020/07/02/43607-436780299_medium.mp4",
-        # #   "narration_text": "A calm and focused mind navigates the volatile markets with clarity. Mindfulness can be your greatest asset.",
-        #   "duration": 8,
-        #   "text": {
-        #     "content": "Stay Calm, Trade Smart",
-        #     "position": "top",
-        #     "fontsize": 42,
-        #     "color": "lightblue"
-        #   }
-        # },
-      ]
-    }
 
     response = client.post("/generate", json=payload)
     assert response.status_code == 200

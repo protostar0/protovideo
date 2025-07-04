@@ -5,6 +5,7 @@ import uuid
 import base64
 import logging
 import time
+import whisper
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -28,7 +29,8 @@ loggingts.set_verbosity_error()
 # Detect device (Mac with M1/M2/M3/M4)
 device = "mps" if torch.backends.mps.is_available() else "cpu"
 map_location = torch.device(device)
-
+import os
+os.environ['TRANSFORMERS_NO_PROGRESS_BAR'] = '1'
 torch_load_original = torch.load
 def patched_torch_load(*args, **kwargs):
     if 'map_location' not in kwargs:
@@ -155,14 +157,18 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
             raise HTTPException(status_code=400, detail="Image URL/path required for image scene.")
         image_path = download_asset(scene.image)
         temp_files.append(image_path)
-        base_scale = 5
-        base_width = int(REEL_SIZE[0] * base_scale)
-        base_height = int(REEL_SIZE[1] * base_scale)
         video_clip = ImageClip(image_path).with_duration(scene.duration)
-        video_clip = video_clip.resized(new_size=(base_width, base_height))
-        video_clip = video_clip.resized(lambda t: 1.0 + 0.5 * (t / scene.duration))
+        # Resize to fit REEL_SIZE, preserving aspect ratio (no cropping)
+        video_clip = video_clip.resized(height=REEL_SIZE[1])
+        if video_clip.w > REEL_SIZE[0]:
+            video_clip = video_clip.resized(width=REEL_SIZE[0])
+        # Apply Ken Burns (zoom-in) effect to the image only (before padding)
+        def zoom(t):
+            return 1.0 + 0.5 * (t / scene.duration)
+        video_clip = video_clip.resized(zoom)
+        # Pad to REEL_SIZE (after zoom)
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
-        logger.info(f"Created ImageClip for {image_path} with REEL_SIZE and zoom-in effect")
+        logger.info(f"Created ImageClip for {image_path} with REEL_SIZE, full image visible, and correct zoom-in effect")
     elif scene.type == "video":
         if not scene.video:
             logger.error("Video URL/path required for video scene.")
@@ -284,7 +290,13 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
             if i < len(clips) - 1:
                 clips[i] = clips[i].with_effects([CrossFadeOut(CROSSFADE_DURATION)])
         final_clip = concatenate_videoclips(clips, method="compose", padding=-CROSSFADE_DURATION)
+
+        # Ensure video is at least as long as the narration audio
+        if use_global_narration and narration_clip and final_clip.duration < narration_clip.duration:
+            final_clip = final_clip.with_duration(narration_clip.duration + 0.2)  # Add a small buffer
+
         output_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}_{request.output_filename}")
+
         # If global narration_text is provided, overlay it on the final video
         if use_global_narration:
             if narration_clip.duration < final_clip.duration:
@@ -297,46 +309,13 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
                 narration_padded = narration_clip.subclipped(0, final_clip.duration)
             final_clip = final_clip.with_audio(narration_padded)
 
-            # --- Animated Subtitles as Phrases ---
-            def split_text_into_chunks(text, chunk_size=5):
-                words = text.split()
-                return [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-
-            chunk_size = 5  # You can set to 3 or 4
-            phrases = split_text_into_chunks(request.narration_text, chunk_size=chunk_size)
-            n_phrases = len(phrases)
-            phrase_duration = final_clip.duration / n_phrases if n_phrases > 0 else final_clip.duration
-            subtitle_clips = []
-            for i, phrase in enumerate(phrases):
-                start = i * phrase_duration
-                txt_clip = (
-                    TextClip(
-                        text=phrase.upper(),  # UPPERCASE is common in Shorts/Reels
-                        font="Impact",       # Try Montserrat or BebasNeue if installed
-                        # font_size=90,
-                        color="white",
-                        stroke_color="black",
-                        # stroke_width=4,
-                        method="label",       # Much sharper than "caption"
-                        # text=phrase,
-                        # font="Arial",
-                        font_size=80,
-                        # color="white",
-                        # stroke_color="black",
-                        stroke_width=2,
-                        # bg_color="black",
-                        # method="caption",
-                        size=(final_clip.w - 120, None)
-                    )
-                    .with_position(("center", int(final_clip.h * 0.75)))
-                    .with_start(start)
-                    .with_duration(phrase_duration)
-                    .with_opacity(0.95)
-                )
-                txt_clip = txt_clip.with_effects([CrossFadeIn(0.2)])
-                txt_clip = txt_clip.with_effects([CrossFadeOut(0.2)])
-                subtitle_clips.append(txt_clip)
-            final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
+            # --- Whisper-based animated phrase subtitles ---
+            try:
+                subtitle_clips = generate_whisper_phrase_subtitles(narration_path, final_clip, words_per_line=4, font_size=60)
+                # subtitle_clips = generate_whisper_phrase_subtitles(narration_path, final_clip, font_size=60)
+                final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
+            except Exception as e:
+                logger.warning(f"Whisper subtitle generation failed: {e}")
         logger.info(f"Exporting final video to {output_path}")
         final_clip.write_videofile(
             output_path,
@@ -399,4 +378,90 @@ def root():
                 ]
             }
         }
-    } 
+    }
+
+# --- Whisper-based phrase subtitle function ---
+# def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, font_size=60):
+#     import whisper
+#     model = whisper.load_model("base")
+#     result = model.transcribe(audio_path, word_timestamps=True)
+#     words = []
+#     for segment in result['segments']:
+#         for word in segment.get('words', []):
+#             words.append(word)
+#     # Group words into lines
+#     lines = []
+#     for i in range(0, len(words), words_per_line):
+#         chunk = words[i:i+words_per_line]
+#         if not chunk:
+#             continue
+#         line_text = ' '.join([w['word'] for w in chunk])
+#         start = chunk[0]['start']
+#         end = chunk[-1]['end']
+#         lines.append({'text': line_text, 'start': start, 'end': end})
+#     # Create subtitle clips
+#     subtitle_clips = []
+#     for line in lines:
+#         txt_clip = (
+#             TextClip(
+#                 text=line['text'].upper(),
+#                 font="Arial",
+#                 font_size=font_size,
+#                 color="white",
+#                 stroke_color="black",
+#                 stroke_width=3,
+#                 method="label",
+#                 size=(video_clip.w - 120, None)
+#             )
+#             .with_position(("center", int(video_clip.h * 0.5)))
+#             .with_start(line['start'])
+#             .with_duration(line['end'] - line['start'])
+#             .with_opacity(0.95)
+#         )
+#         subtitle_clips.append(txt_clip)
+#     return subtitle_clips 
+
+def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, font_size=50):
+    model = whisper.load_model("base")
+
+    result = model.transcribe(audio_path, word_timestamps=True)
+
+    all_words = []
+    for segment in result['segments']:
+        all_words.extend(segment.get('words', []))
+
+    # Group words into lines
+    lines = []
+    for i in range(0, len(all_words), words_per_line):
+        chunk = all_words[i:i + words_per_line]
+        if not chunk:
+            continue
+        line_text = ' '.join([w['word'].strip() for w in chunk])
+        start = chunk[0]['start']
+        end = chunk[-1]['end']
+        lines.append({'text': line_text.upper(), 'start': start, 'end': end, 'words': chunk})
+
+    # Create subtitle clips
+    subtitle_clips = []
+
+    for line in lines:
+        # Base line in white
+        base_clip = (
+            TextClip(
+                text = line['text']+"\n_",
+                font="./montserrat/Montserrat-Black.ttf",
+                font_size=font_size,
+                color="white",
+                stroke_color="black",
+                stroke_width=4,
+                method="caption",
+                text_align="center",
+                size=(video_clip.w - 120, None)
+            )
+            .with_position(("center", int(video_clip.h * 0.4)))
+            .with_start(line['start'])
+            .with_duration(line['end'] - line['start'])
+        )
+        subtitle_clips.append(base_clip)
+
+    return subtitle_clips

@@ -18,15 +18,15 @@ torch.load = patched_torch_load
 
 model = ChatterboxTTS.from_pretrained(device=device)
 
-text = """Everyone wants the perfect strategy...
-But they forget the mind behind it."
+text = """Success in trading begins with mastering your own mind. Emotions can cloud judgment and lead to impulsive decisions.",
+
 """
 # If you want to synthesize with a different voice, specify the audio prompt
 # AUDIO_PROMPT_PATH = "YOUR_FILE.wav"
 wav = model.generate(
     text, 
     # audio_prompt_path=AUDIO_PROMPT_PATH,
-    exaggeration=5.0,
+    exaggeration=0.5,
     cfg_weight=0.5
     )
 ta.save("test-4.mp3", wav, model.sr)
