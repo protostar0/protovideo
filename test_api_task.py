@@ -30,6 +30,7 @@ payload = {
                 "type": "image",
                 "image": "https://images.pexels.com/photos/14751274/pexels-photo-14751274.jpeg",
                 "duration": 6
+
                 }
             ]
             }
