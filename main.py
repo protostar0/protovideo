@@ -5,9 +5,10 @@ import uuid
 import base64
 import logging
 import time
+import threading
 import whisper
 from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,6 +146,8 @@ def cleanup_files(filepaths: List[str]):
         except Exception as e:
             logger.warning(f"Failed to delete temp file {path}: {e}")
 
+from moviepy.video.fx import MultiplyColor
+
 def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[str]):
     logger.info(f"Rendering scene: {scene}")
     temp_files = []
@@ -169,6 +172,8 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
         # Pad to REEL_SIZE (after zoom)
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
         logger.info(f"Created ImageClip for {image_path} with REEL_SIZE, full image visible, and correct zoom-in effect")
+        # Darken the image for better text readability
+        video_clip = video_clip.with_effects([MultiplyColor(0.5)])
     elif scene.type == "video":
         if not scene.video:
             logger.error("Video URL/path required for video scene.")
@@ -184,6 +189,8 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
         video_clip = video_clip.resized(height=REEL_SIZE[1])
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
         logger.info(f"Created VideoFileClip for {video_path} with REEL_SIZE")
+        # Darken the video for better text readability
+        video_clip = video_clip.with_effects([MultiplyColor(0.5)])
     else:
         logger.error(f"Unknown scene type: {scene.type}")
         raise HTTPException(status_code=400, detail=f"Unknown scene type: {scene.type}")
@@ -275,7 +282,7 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
             if num_scenes > 0:
                 per_scene_duration = narration_duration / num_scenes
                 for scene in request.scenes:
-                    scene.duration = per_scene_duration
+                    scene.duration = int(round(per_scene_duration))
         for idx, scene in enumerate(request.scenes):
             logger.info(f"Processing scene {idx+1}/{len(request.scenes)}")
             scene_file, files_to_clean = render_scene(scene, use_global_narration=use_global_narration)
@@ -465,3 +472,148 @@ def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, 
         subtitle_clips.append(base_clip)
 
     return subtitle_clips
+
+# In-memory task store
+tasks = {}  # task_id: {status, result, error}
+
+def video_generation_worker(task_id, request_dict):
+    try:
+        tasks[task_id]["status"] = "inprogress"
+        # Reuse the generate_video logic, but don't use FastAPI request/response
+        # Simulate a request object
+        class DummyRequest:
+            pass
+        dummy_request = DummyRequest()
+        for k, v in request_dict.items():
+            setattr(dummy_request, k, v)
+        # Call the main video generation logic
+        # We need to call the core logic, not the FastAPI endpoint
+        # So, refactor the main logic into a helper function
+        result = generate_video_core(request_dict)
+        tasks[task_id]["status"] = "finished"
+        tasks[task_id]["result"] = result
+    except Exception as e:
+        tasks[task_id]["status"] = "failed"
+        tasks[task_id]["error"] = str(e)
+
+# Refactor the main video generation logic into a helper function
+def generate_video_core(request_dict):
+    # This is a copy of the main logic from generate_video, but using dict input/output
+    # (You can refactor your code to avoid duplication if you wish)
+    import copy
+    request = copy.deepcopy(request_dict)
+    temp_files = []
+    scene_files = []
+    use_global_narration = bool(request.get("narration_text"))
+    narration_path = None
+    narration_duration = None
+    try:
+        if use_global_narration:
+            narration_path = generate_narration(request["narration_text"])
+            temp_files.append(narration_path)
+            narration_clip = AudioFileClip(narration_path)
+            narration_duration = narration_clip.duration
+            num_scenes = len(request["scenes"])
+            if num_scenes > 0:
+                per_scene_duration = narration_duration / num_scenes
+                for scene in request["scenes"]:
+                    scene["duration"] = int(round(per_scene_duration))
+        for idx, scene in enumerate(request["scenes"]):
+            scene_file, files_to_clean = render_scene(SceneInput(**scene), use_global_narration=use_global_narration)
+            scene_files.append(scene_file)
+            temp_files.extend(files_to_clean)
+        clips = [VideoFileClip(f) for f in scene_files]
+        CROSSFADE_DURATION = 1.0
+        for i in range(len(clips)):
+            if i > 0:
+                clips[i] = clips[i].with_effects([CrossFadeIn(CROSSFADE_DURATION)])
+            if i < len(clips) - 1:
+                clips[i] = clips[i].with_effects([CrossFadeOut(CROSSFADE_DURATION)])
+        final_clip = concatenate_videoclips(clips, method="compose", padding=-CROSSFADE_DURATION)
+        if use_global_narration and narration_clip and final_clip.duration < narration_clip.duration:
+            final_clip = final_clip.with_duration(narration_clip.duration + 0.2)
+        output_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}_{request['output_filename']}")
+        if use_global_narration:
+            if narration_clip.duration < final_clip.duration:
+                silence = AudioClip(lambda t: 0, duration=final_clip.duration - narration_clip.duration)
+                narration_padded = CompositeAudioClip([
+                    narration_clip,
+                    silence.with_start(narration_clip.duration)
+                ]).with_duration(final_clip.duration)
+            else:
+                narration_padded = narration_clip.subclipped(0, final_clip.duration)
+            final_clip = final_clip.with_audio(narration_padded)
+            try:
+                subtitle_clips = generate_whisper_phrase_subtitles(narration_path, final_clip, words_per_line=4, font_size=60)
+                final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
+            except Exception as e:
+                logger.warning(f"Whisper subtitle generation failed: {e}")
+        final_clip.write_videofile(
+            output_path,
+            fps=24,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=f"{output_path}.temp_audio.m4a",
+            remove_temp=True,
+            logger=None
+        )
+        final_clip.close()
+        for c in clips:
+            c.close()
+        cleanup_files(temp_files)
+        return {"download_url": f"/download/{os.path.basename(output_path)}"}
+    except Exception as e:
+        cleanup_files(temp_files)
+        raise
+
+API_KEY = "N8S6R_TydmHr58LoUzYZf9v2gRkcfWZemz1zWZ5WMkE"  # Change this to your actual secret key
+
+def require_api_key(request: Request):
+    api_key = request.headers.get("x-api-key")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
+# Wrap endpoints with API key check
+from functools import wraps
+import inspect
+
+def api_key_required(endpoint):
+    @wraps(endpoint)
+    async def wrapper(*args, **kwargs):
+        request = kwargs.get('request')
+        if not request:
+            for arg in args:
+                if isinstance(arg, Request):
+                    request = arg
+                    break
+        if not request:
+            raise HTTPException(status_code=401, detail="Missing request context for API key check.")
+        require_api_key(request)
+        if inspect.iscoroutinefunction(endpoint):
+            return await endpoint(*args, **kwargs)
+        else:
+            return endpoint(*args, **kwargs)
+    return wrapper
+
+# Update endpoints to require API key
+@app.post("/generate-task")
+@api_key_required
+def generate_task(request: Request, video_request: VideoRequest):
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {"status": "queued"}
+    thread = threading.Thread(target=video_generation_worker, args=(task_id, video_request.dict()))
+    thread.start()
+    return {"task_id": task_id, "status": "queued"}
+
+@app.get("/task-status/{task_id}")
+@api_key_required
+def get_task_status(request: Request, task_id: str):
+    task = tasks.get(task_id)
+    if not task:
+        return JSONResponse({"error": "Task not found"}, status_code=404)
+    resp = {"task_id": task_id, "status": task["status"]}
+    if task["status"] == "finished":
+        resp["result"] = task["result"]
+    if task["status"] == "failed":
+        resp["error"] = task.get("error")
+    return resp

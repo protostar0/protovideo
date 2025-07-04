@@ -5,4 +5,9 @@ gtts
 aiofiles
 python-multipart
 requests
-pytest 
+pytest
+torch
+torchaudio
+chatterbox-tts
+openai-whisper
+transformers 
