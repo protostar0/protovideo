@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from moviepy import (
     ImageClip, VideoFileClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, TextClip, CompositeAudioClip
 )
+import boto3
+
 from gtts import gTTS
 import requests
 from moviepy import AudioClip
@@ -167,6 +169,8 @@ class DummyTqdm:
     def __next__(self): raise StopIteration
 
 tqdm.tqdm = DummyTqdm
+
+import gc
 
 def render_scene(scene: SceneInput, use_global_narration=False, task_id=None) -> (str, List[str]):
     log_prefix = f"[task_id={task_id}] " if task_id else ""
@@ -331,6 +335,8 @@ def render_scene(scene: SceneInput, use_global_narration=False, task_id=None) ->
     )
     temp_files.append(scene_output)
     video_clip.close()
+    del video_clip
+    gc.collect()  # Free memory after scene
     logger.info(f"{log_prefix}Scene rendered and saved: {scene_output}")
     return scene_output, temp_files
 
@@ -583,43 +589,55 @@ def generate_video_core(request_dict, task_id=None):
             scene_file, files_to_clean = render_scene(SceneInput(**scene), use_global_narration=use_global_narration, task_id=task_id)
             scene_files.append(scene_file)
             temp_files.extend(files_to_clean)
+            gc.collect()  # Free memory after each scene
         # When concatenating scenes, do not add any extra silence or black screen
         clips = [VideoFileClip(f) for f in scene_files]
-        final_clip = concatenate_videoclips(clips, method="compose")
-        if use_global_narration and narration_clip and final_clip.duration < narration_clip.duration:
-            final_clip = final_clip.with_duration(narration_clip.duration + 0.2)
-        output_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}_{request['output_filename']}")
-        if use_global_narration:
-            if narration_clip.duration < final_clip.duration:
-                silence = AudioClip(lambda t: 0, duration=final_clip.duration - narration_clip.duration)
-                narration_padded = CompositeAudioClip([
-                    narration_clip,
-                    silence.with_start(narration_clip.duration)
-                ]).with_duration(final_clip.duration)
-            else:
-                narration_padded = narration_clip.subclipped(0, final_clip.duration)
-            final_clip = final_clip.with_audio(narration_padded)
-            try:
-                subtitle_clips = generate_whisper_phrase_subtitles(narration_path, final_clip, words_per_line=4, font_size=60)
-                final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
-            except Exception as e:
-                logger.warning(f"[task_id={task_id}] Whisper subtitle generation failed: {e}")
-        # Write the initial final video (without subtitles)
-        logger.info(f"[task_id={task_id}] Exporting final video to {output_path} (no subtitles yet)")
-        final_clip.write_videofile(
-            output_path,
-            fps=24,
-            codec="libx264",
-            audio_codec="aac",
-            temp_audiofile=f"{output_path}.temp_audio.m4a",
-            remove_temp=True,
-            logger=None
-        )
-        final_clip.close()
-        for c in clips:
-            c.close()
+        try:
+            final_clip = concatenate_videoclips(clips, method="compose")
+            output_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}_{request['output_filename']}")
+            logger.info(f"[task_id={task_id}] Exporting final video to {output_path} (no subtitles yet)")
+            final_clip.write_videofile(
+                output_path,
+                fps=24,
+                codec="libx264",
+                audio_codec="aac",
+                temp_audiofile=f"{output_path}.temp_audio.m4a",
+                remove_temp=True,
+                logger=None
+            )
+            final_clip.close()
+            del final_clip
+            gc.collect()  # Free memory after final video
+        finally:
+            for c in clips:
+                c.close()
+                del c
+            gc.collect()  # Free memory after closing all clips
         # (Removed final video subtitle overlay; only per-scene subtitles are supported now)
-        return {"download_url": f"/download/{os.path.basename(output_path)}"}
+        print("Upload to R2 after video is generated")
+        r2_url = None
+        try:
+            bucket_name = os.environ.get('R2_BUCKET_NAME')
+            endpoint_url = os.environ.get('R2_ENDPOINT_URL')
+            access_key = os.environ.get('R2_ACCESS_KEY_ID')
+            secret_key = os.environ.get('R2_SECRET_ACCESS_KEY')
+            public_base = os.environ.get('R2_PUBLIC_BASE_URL')
+            logger.info(f"[task_id={task_id}] R2 env: bucket={bucket_name}, endpoint={endpoint_url}, access_key={'set' if access_key else 'unset'}, secret_key={'set' if secret_key else 'unset'}, public_base={public_base}")
+            logger.info(f"[task_id={task_id}] Attempting R2 upload: {output_path}, bucket={bucket_name}")
+            if bucket_name:
+                r2_url = upload_to_r2(output_path, bucket_name, os.path.basename(output_path))
+                if r2_url:
+                    logger.info(f"[task_id={task_id}] R2 upload successful: {r2_url}")
+                else:
+                    logger.warning(f"[task_id={task_id}] R2 upload did not return a URL.")
+            else:
+                logger.warning(f"[task_id={task_id}] R2_BUCKET_NAME not set, skipping upload.")
+        except Exception as e:
+            logger.warning(f"[task_id={task_id}] R2 upload failed: {e}")
+        result = {"download_url": f"/download/{os.path.basename(output_path)}"}
+        if r2_url:
+            result["r2_url"] = r2_url
+        return result
     except Exception as e:
         cleanup_files(temp_files)
         logger.error(f"[task_id={task_id}] Video generation failed: {e}")
@@ -676,3 +694,21 @@ def get_task_status(request: Request, task_id: str):
     if task["status"] == "failed":
         resp["error"] = task.get("error")
     return resp
+
+
+def upload_to_r2(local_file_path, bucket_name, object_key):
+    import os
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='s3',
+        endpoint_url=os.environ.get('R2_ENDPOINT_URL'),
+        aws_access_key_id=os.environ.get('R2_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.environ.get('R2_SECRET_ACCESS_KEY'),
+    )
+    client.upload_file(local_file_path, bucket_name, object_key)
+    logger.info(f"✅ Uploaded to R2: {bucket_name}/{object_key}")
+    # For public buckets, construct the public URL
+    r2_public_base = os.environ.get('R2_PUBLIC_BASE_URL')
+    if r2_public_base:
+        return f"{r2_public_base.rstrip('/')}/{object_key}"
+    return None

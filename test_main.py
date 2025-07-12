@@ -214,7 +214,7 @@ def test_generate_promptimage_scene(tmp_path):
 
 # Note: For a full integration test, you would need to provide valid URLs or local files for image/video/audio assets.
 # This is a minimal set of tests for API structure and error handling. 
-test_generate_promptimage_scene(Path("./results/"))
+test_generate_tempimage_scene(Path("./results/"))
 
 
 
