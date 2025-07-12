@@ -436,6 +436,7 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
             remove_temp=True,
             logger=None
         )
+        # --- IMMEDIATELY FREE MEMORY AFTER EXPORT ---
         final_clip.close()
         for c in clips:
             c.close()
@@ -605,14 +606,25 @@ def generate_video_core(request_dict, task_id=None):
                 remove_temp=True,
                 logger=None
             )
+            # --- IMMEDIATELY FREE MEMORY AFTER EXPORT ---
             final_clip.close()
             del final_clip
-            gc.collect()  # Free memory after final video
-        finally:
             for c in clips:
                 c.close()
                 del c
-            gc.collect()  # Free memory after closing all clips
+            gc.collect()  # Free memory before any further processing
+        finally:
+            # In case of exception, still try to free memory
+            for c in clips:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+                try:
+                    del c
+                except Exception:
+                    pass
+            gc.collect()
         # (Removed final video subtitle overlay; only per-scene subtitles are supported now)
         print("Upload to R2 after video is generated")
         r2_url = None

@@ -3,6 +3,7 @@ import time
 import os
 
 API_URL = "https://protovideo-production.up.railway.app"
+API_URL = "http://localhost:8000"
 API_KEY = "N8S6R_TydmHr58LoUzYZf9v2gRkcfWZemz1zWZ5WMkE"
 HEADERS = {"x-api-key": API_KEY}
 
@@ -50,6 +51,7 @@ def main():
         status_resp.raise_for_status()
         status_data = status_resp.json()
         print(f"Status: {status_data['status']}")
+        print(status_data)
         if status_data["status"] == "finished":
             video_url = status_data["result"]["download_url"]
             print(f"Task finished! Downloading video from {video_url}")
