@@ -2,7 +2,7 @@ import requests
 import time
 import os
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = "https://protovideo-production.up.railway.app"
 API_KEY = "N8S6R_TydmHr58LoUzYZf9v2gRkcfWZemz1zWZ5WMkE"
 HEADERS = {"x-api-key": API_KEY}
 
@@ -30,7 +30,6 @@ payload = {
                 "type": "image",
                 "image": "https://images.pexels.com/photos/14751274/pexels-photo-14751274.jpeg",
                 "duration": 6
-
                 }
             ]
             }

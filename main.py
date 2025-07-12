@@ -43,8 +43,9 @@ torch.load = patched_torch_load
 model = ChatterboxTTS.from_pretrained(device=device)
 
 # --- Logging setup ---
+import sys
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 app = FastAPI()
 
@@ -72,12 +73,14 @@ class TextOverlay(BaseModel):
 class SceneInput(BaseModel):
     type: str  # 'image' or 'video'
     image: Optional[str] = None
+    promptImage: Optional[str] = None  # <-- new field for image prompt
     video: Optional[str] = None
     narration: Optional[str] = None
     narration_text: Optional[str] = None
     music: Optional[str] = None
     duration: int
     text: Optional[TextOverlay] = None
+    subtitle: bool = False  # <-- new field to control per-scene subtitles
 
 class VideoRequest(BaseModel):
     output_filename: str = Field(default_factory=lambda: f"output_{uuid.uuid4().hex}.mp4")
@@ -147,37 +150,107 @@ def cleanup_files(filepaths: List[str]):
             logger.warning(f"Failed to delete temp file {path}: {e}")
 
 from moviepy.video.fx import MultiplyColor
+from generate_image import generate_image_from_prompt
+from moviepy.audio.io.AudioFileClip import AudioFileClip
+from moviepy.audio.AudioClip import AudioClip, concatenate_audioclips
+import tqdm
+# Suppress all tqdm progress bars globally with a dummy context manager
+class DummyTqdm:
+    def __init__(self, *a, **k): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def update(self, *a, **k): pass
+    def close(self): pass
+    def set_postfix(self, *a, **k): pass
+    def set_description(self, *a, **k): pass
+    def __iter__(self): return iter([])
+    def __next__(self): raise StopIteration
 
-def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[str]):
-    logger.info(f"Rendering scene: {scene}")
+tqdm.tqdm = DummyTqdm
+
+def render_scene(scene: SceneInput, use_global_narration=False, task_id=None) -> (str, List[str]):
+    log_prefix = f"[task_id={task_id}] " if task_id else ""
+    logger.info(f"{log_prefix}Rendering scene: {scene}")
     temp_files = []
     video_clip = None
     audio_clips = []
     # Handle image or video
     if scene.type == "image":
-        if not scene.image:
-            logger.error("Image URL/path required for image scene.")
-            raise HTTPException(status_code=400, detail="Image URL/path required for image scene.")
-        image_path = download_asset(scene.image)
-        temp_files.append(image_path)
-        video_clip = ImageClip(image_path).with_duration(scene.duration)
+        image_path = None
+        if scene.image:
+            image_path = download_asset(scene.image)
+            temp_files.append(image_path)
+            logger.info(f"{log_prefix}Added image from file: {image_path}")
+        elif scene.promptImage:
+            # Generate image from prompt using generate_image_from_prompt directly
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                logger.error(f"{log_prefix}OPENAI_API_KEY environment variable not set.")
+                raise HTTPException(status_code=500, detail="OPENAI_API_KEY environment variable not set.")
+            out_path = os.path.join(tempfile.gettempdir(), f"generated_{uuid.uuid4().hex}.png")
+            try:
+                image_path = generate_image_from_prompt(scene.promptImage, api_key, out_path)
+                temp_files.append(image_path)
+                logger.info(f"{log_prefix}Generated image from prompt: {image_path}")
+            except Exception as e:
+                logger.error(f"{log_prefix}Image generation failed: {e}")
+                raise HTTPException(status_code=500, detail=f"{log_prefix}Image generation failed: {e}")
+        else:
+            logger.error(f"{log_prefix}Image URL/path or promptImage required for image scene.")
+            raise HTTPException(status_code=400, detail=f"{log_prefix}Image URL/path or promptImage required for image scene.")
+        # --- Set duration from narration_text if present ---
+        narration_path = None
+        narration_duration = None
+        narration_audio = None
+        if not use_global_narration:
+            if scene.narration:
+                narration_path = download_asset(scene.narration)
+                temp_files.append(narration_path)
+                logger.info(f"{log_prefix}Added narration from file: {narration_path}")
+            elif scene.narration_text:
+                narration_path = generate_narration(scene.narration_text)
+                temp_files.append(narration_path)
+                logger.info(f"{log_prefix}Added narration from text: {narration_path}")
+                # Set duration to narration duration + 2s silence
+                narration_audio = AudioFileClip(narration_path)
+                silence = AudioClip(lambda t: 0, duration=1.5, fps=44100)
+                scene.duration = narration_audio.duration + 1.5
+        # If no narration_text, use provided duration
+        if not scene.narration_text:
+            duration = scene.duration
+        else:
+            duration = scene.duration
+        video_clip = ImageClip(image_path).with_duration(duration)
         # Resize to fit REEL_SIZE, preserving aspect ratio (no cropping)
         video_clip = video_clip.resized(height=REEL_SIZE[1])
         if video_clip.w > REEL_SIZE[0]:
             video_clip = video_clip.resized(width=REEL_SIZE[0])
         # Apply Ken Burns (zoom-in) effect to the image only (before padding)
         def zoom(t):
-            return 1.0 + 0.5 * (t / scene.duration)
+            return 1.0 + 0.5 * (t / duration)
         video_clip = video_clip.resized(zoom)
         # Pad to REEL_SIZE (after zoom)
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
-        logger.info(f"Created ImageClip for {image_path} with REEL_SIZE, full image visible, and correct zoom-in effect")
+        logger.info(f"{log_prefix}Created ImageClip for {image_path} with REEL_SIZE, full image visible, and correct zoom-in effect")
         # Darken the image for better text readability
         video_clip = video_clip.with_effects([MultiplyColor(0.5)])
+        # Add subtitles for narration_text if present and subtitle is True
+        if scene.narration_text and narration_path and getattr(scene, 'subtitle', False):
+            try:
+                subtitle_clips = generate_whisper_phrase_subtitles(narration_path, video_clip, words_per_line=4, font_size=50)
+                video_clip = CompositeVideoClip([video_clip] + subtitle_clips)
+                logger.info(f"{log_prefix}Subtitles added for scene narration.")
+            except Exception as e:
+                logger.warning(f"{log_prefix}Subtitle generation failed for scene: {e}")
+        # Attach audio (narration + 2s silence) if narration_text
+        if scene.narration_text and narration_audio is not None:
+            full_audio = concatenate_audioclips([narration_audio, silence])
+            video_clip = video_clip.with_audio(full_audio)
+            narration_audio.close()
     elif scene.type == "video":
         if not scene.video:
-            logger.error("Video URL/path required for video scene.")
-            raise HTTPException(status_code=400, detail="Video URL/path required for video scene.")
+            logger.error(f"{log_prefix}Video URL/path required for video scene.")
+            raise HTTPException(status_code=400, detail=f"{log_prefix}Video URL/path required for video scene.")
         video_path = download_asset(scene.video)
         temp_files.append(video_path)
         video_clip = VideoFileClip(video_path)
@@ -188,15 +261,15 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
             video_clip = video_clip.with_duration(scene.duration)
         video_clip = video_clip.resized(height=REEL_SIZE[1])
         video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
-        logger.info(f"Created VideoFileClip for {video_path} with REEL_SIZE")
+        logger.info(f"{log_prefix}Created VideoFileClip for {video_path} with REEL_SIZE")
         # Darken the video for better text readability
         video_clip = video_clip.with_effects([MultiplyColor(0.5)])
     else:
-        logger.error(f"Unknown scene type: {scene.type}")
-        raise HTTPException(status_code=400, detail=f"Unknown scene type: {scene.type}")
+        logger.error(f"{log_prefix}Unknown scene type: {scene.type}")
+        raise HTTPException(status_code=400, detail=f"{log_prefix}Unknown scene type: {scene.type}")
     # Handle text overlay
     if scene.text:
-        logger.info(f"Adding text overlay: {scene.text.content}")
+        logger.info(f"{log_prefix}Adding text overlay: {scene.text.content}")
         txt_clip = TextClip(
             font="Arial.ttf",
             text=scene.text.content,
@@ -210,18 +283,18 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
         elif scene.text.position == "bottom":
             txt_clip = txt_clip.with_position(('center', 'bottom'))
         video_clip = CompositeVideoClip([video_clip, txt_clip])
-        logger.info("Text overlay added.")
+        logger.info(f"{log_prefix}Text overlay added.")
     # Handle narration (skip if using global narration)
     narration_path = None
     if not use_global_narration:
         if scene.narration:
             narration_path = download_asset(scene.narration)
             temp_files.append(narration_path)
-            logger.info(f"Added narration from file: {narration_path}")
+            logger.info(f"{log_prefix}Added narration from file: {narration_path}")
         elif scene.narration_text:
             narration_path = generate_narration(scene.narration_text)
             temp_files.append(narration_path)
-            logger.info(f"Added narration from text: {narration_path}")
+            logger.info(f"{log_prefix}Added narration from text: {narration_path}")
         if narration_path:
             narration_clip = AudioFileClip(narration_path)
             if narration_clip.duration < video_clip.duration:
@@ -239,14 +312,14 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
         music_path = download_asset(scene.music)
         temp_files.append(music_path)
         audio_clips.append(AudioFileClip(music_path).with_volume_scaled(0.3).with_duration(scene.duration))
-        logger.info(f"Added background music: {music_path}")
+        logger.info(f"{log_prefix}Added background music: {music_path}")
     # Mix audio
     if audio_clips:
-        logger.info(f"Mixing {len(audio_clips)} audio tracks for scene.")
+        logger.info(f"{log_prefix}Mixing {len(audio_clips)} audio tracks for scene.")
         composite_audio = CompositeAudioClip(audio_clips)
         video_clip = video_clip.with_audio(composite_audio)
     scene_output = os.path.join(TEMP_DIR, f"scene_{uuid.uuid4().hex}.mp4")
-    logger.info(f"Exporting scene to {scene_output}")
+    logger.info(f"{log_prefix}Exporting scene to {scene_output}")
     video_clip.write_videofile(
         scene_output,
         fps=24,
@@ -258,7 +331,7 @@ def render_scene(scene: SceneInput, use_global_narration=False) -> (str, List[st
     )
     temp_files.append(scene_output)
     video_clip.close()
-    logger.info(f"Scene rendered and saved: {scene_output}")
+    logger.info(f"{log_prefix}Scene rendered and saved: {scene_output}")
     return scene_output, temp_files
 
 # --- API Endpoint ---
@@ -290,13 +363,27 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
             temp_files.extend(files_to_clean)
         logger.info(f"Concatenating {len(scene_files)} scenes...")
         clips = [VideoFileClip(f) for f in scene_files]
+        # Remove black screen between scenes; add 1s audio silence between scenes instead
+        def get_audio_with_silence(clip, add_silence_after=True):
+            audio = clip.audio
+            if add_silence_after and audio is not None:
+                silence = AudioClip(lambda t: 0, duration=1.0, fps=44100)
+                return concatenate_audioclips([audio, silence])
+            else:
+                return audio
+        new_clips = []
+        for i, clip in enumerate(clips):
+            # Add 1s silence after all but the last scene
+            audio = get_audio_with_silence(clip, add_silence_after=(i < len(clips)-1))
+            new_clip = clip.with_audio(audio)
+            new_clips.append(new_clip)
         CROSSFADE_DURATION = 1.0
-        for i in range(len(clips)):
+        for i in range(len(new_clips)):
             if i > 0:
-                clips[i] = clips[i].with_effects([CrossFadeIn(CROSSFADE_DURATION)])
-            if i < len(clips) - 1:
-                clips[i] = clips[i].with_effects([CrossFadeOut(CROSSFADE_DURATION)])
-        final_clip = concatenate_videoclips(clips, method="compose", padding=-CROSSFADE_DURATION)
+                new_clips[i] = new_clips[i].with_effects([CrossFadeIn(CROSSFADE_DURATION)])
+            if i < len(new_clips) - 1:
+                new_clips[i] = new_clips[i].with_effects([CrossFadeOut(CROSSFADE_DURATION)])
+        final_clip = concatenate_videoclips(new_clips, method="compose", padding=-CROSSFADE_DURATION)
 
         # Ensure video is at least as long as the narration audio
         if use_global_narration and narration_clip and final_clip.duration < narration_clip.duration:
@@ -323,6 +410,16 @@ def generate_video(request: VideoRequest, background_tasks: BackgroundTasks):
                 final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
             except Exception as e:
                 logger.warning(f"Whisper subtitle generation failed: {e}")
+        # After final_clip is ready and has audio, generate subtitles for the whole video
+        final_audio_path = os.path.join(TEMP_DIR, f"final_audio_{uuid.uuid4().hex}.wav")
+        # if final_clip.audio is not None:
+        #     final_clip.audio.write_audiofile(final_audio_path, fps=44100)
+        #     try:
+        #         subtitle_clips = generate_whisper_phrase_subtitles(final_audio_path, final_clip, words_per_line=4, font_size=60)
+        #         final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
+        #         logger.info(f"Subtitles added to final video.")
+        #     except Exception as e:
+        #         logger.warning(f"Final video subtitle generation failed: {e}")
         logger.info(f"Exporting final video to {output_path}")
         final_clip.write_videofile(
             output_path,
@@ -388,55 +485,18 @@ def root():
     }
 
 # --- Whisper-based phrase subtitle function ---
-# def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, font_size=60):
-#     import whisper
-#     model = whisper.load_model("base")
-#     result = model.transcribe(audio_path, word_timestamps=True)
-#     words = []
-#     for segment in result['segments']:
-#         for word in segment.get('words', []):
-#             words.append(word)
-#     # Group words into lines
-#     lines = []
-#     for i in range(0, len(words), words_per_line):
-#         chunk = words[i:i+words_per_line]
-#         if not chunk:
-#             continue
-#         line_text = ' '.join([w['word'] for w in chunk])
-#         start = chunk[0]['start']
-#         end = chunk[-1]['end']
-#         lines.append({'text': line_text, 'start': start, 'end': end})
-#     # Create subtitle clips
-#     subtitle_clips = []
-#     for line in lines:
-#         txt_clip = (
-#             TextClip(
-#                 text=line['text'].upper(),
-#                 font="Arial",
-#                 font_size=font_size,
-#                 color="white",
-#                 stroke_color="black",
-#                 stroke_width=3,
-#                 method="label",
-#                 size=(video_clip.w - 120, None)
-#             )
-#             .with_position(("center", int(video_clip.h * 0.5)))
-#             .with_start(line['start'])
-#             .with_duration(line['end'] - line['start'])
-#             .with_opacity(0.95)
-#         )
-#         subtitle_clips.append(txt_clip)
-#     return subtitle_clips 
-
 def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, font_size=50):
+    import traceback
+    logger.info(f"[DEBUG] Entered generate_whisper_phrase_subtitles with audio_path={audio_path}, video_clip={video_clip}, words_per_line={words_per_line}, font_size={font_size}")
     model = whisper.load_model("base")
-
-    result = model.transcribe(audio_path, word_timestamps=True)
-
+    try:
+        result = model.transcribe(audio_path, word_timestamps=True, verbose=False)
+    except Exception as e:
+        logger.error(f"[DEBUG] Exception during whisper transcribe: {e}\n{traceback.format_exc()}")
+        raise
     all_words = []
     for segment in result['segments']:
         all_words.extend(segment.get('words', []))
-
     # Group words into lines
     lines = []
     for i in range(0, len(all_words), words_per_line):
@@ -447,30 +507,30 @@ def generate_whisper_phrase_subtitles(audio_path, video_clip, words_per_line=4, 
         start = chunk[0]['start']
         end = chunk[-1]['end']
         lines.append({'text': line_text.upper(), 'start': start, 'end': end, 'words': chunk})
-
     # Create subtitle clips
     subtitle_clips = []
-
     for line in lines:
-        # Base line in white
-        base_clip = (
-            TextClip(
-                text = line['text']+"\n_",
-                font="./montserrat/Montserrat-Black.ttf",
-                font_size=font_size,
-                color="white",
-                stroke_color="black",
-                stroke_width=4,
-                method="caption",
-                text_align="center",
-                size=(video_clip.w - 120, None)
+        try:
+            base_clip = (
+                TextClip(
+                    text = line['text']+"\n_",
+                    font="./montserrat/Montserrat-Black.ttf",
+                    font_size=font_size,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=4,
+                    method="caption",
+                    text_align="center",
+                    size=(video_clip.w - 120, None)
+                )
+                .with_position(("center", int(video_clip.h * 0.6)))
+                .with_start(line['start'])
+                .with_duration(line['end'] - line['start'])
             )
-            .with_position(("center", int(video_clip.h * 0.4)))
-            .with_start(line['start'])
-            .with_duration(line['end'] - line['start'])
-        )
-        subtitle_clips.append(base_clip)
-
+            subtitle_clips.append(base_clip)
+        except Exception as e:
+            logger.error(f"[DEBUG] Exception during subtitle clip creation: {e}\n{traceback.format_exc()}")
+            raise
     return subtitle_clips
 
 # In-memory task store
@@ -489,7 +549,7 @@ def video_generation_worker(task_id, request_dict):
         # Call the main video generation logic
         # We need to call the core logic, not the FastAPI endpoint
         # So, refactor the main logic into a helper function
-        result = generate_video_core(request_dict)
+        result = generate_video_core(request_dict, task_id=task_id)
         tasks[task_id]["status"] = "finished"
         tasks[task_id]["result"] = result
     except Exception as e:
@@ -497,7 +557,7 @@ def video_generation_worker(task_id, request_dict):
         tasks[task_id]["error"] = str(e)
 
 # Refactor the main video generation logic into a helper function
-def generate_video_core(request_dict):
+def generate_video_core(request_dict, task_id=None):
     # This is a copy of the main logic from generate_video, but using dict input/output
     # (You can refactor your code to avoid duplication if you wish)
     import copy
@@ -519,17 +579,13 @@ def generate_video_core(request_dict):
                 for scene in request["scenes"]:
                     scene["duration"] = int(round(per_scene_duration))
         for idx, scene in enumerate(request["scenes"]):
-            scene_file, files_to_clean = render_scene(SceneInput(**scene), use_global_narration=use_global_narration)
+            logger.info(f"[task_id={task_id}] Processing scene {idx+1}/{len(request['scenes'])}")
+            scene_file, files_to_clean = render_scene(SceneInput(**scene), use_global_narration=use_global_narration, task_id=task_id)
             scene_files.append(scene_file)
             temp_files.extend(files_to_clean)
+        # When concatenating scenes, do not add any extra silence or black screen
         clips = [VideoFileClip(f) for f in scene_files]
-        CROSSFADE_DURATION = 1.0
-        for i in range(len(clips)):
-            if i > 0:
-                clips[i] = clips[i].with_effects([CrossFadeIn(CROSSFADE_DURATION)])
-            if i < len(clips) - 1:
-                clips[i] = clips[i].with_effects([CrossFadeOut(CROSSFADE_DURATION)])
-        final_clip = concatenate_videoclips(clips, method="compose", padding=-CROSSFADE_DURATION)
+        final_clip = concatenate_videoclips(clips, method="compose")
         if use_global_narration and narration_clip and final_clip.duration < narration_clip.duration:
             final_clip = final_clip.with_duration(narration_clip.duration + 0.2)
         output_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4().hex}_{request['output_filename']}")
@@ -547,7 +603,9 @@ def generate_video_core(request_dict):
                 subtitle_clips = generate_whisper_phrase_subtitles(narration_path, final_clip, words_per_line=4, font_size=60)
                 final_clip = CompositeVideoClip([final_clip] + subtitle_clips)
             except Exception as e:
-                logger.warning(f"Whisper subtitle generation failed: {e}")
+                logger.warning(f"[task_id={task_id}] Whisper subtitle generation failed: {e}")
+        # Write the initial final video (without subtitles)
+        logger.info(f"[task_id={task_id}] Exporting final video to {output_path} (no subtitles yet)")
         final_clip.write_videofile(
             output_path,
             fps=24,
@@ -560,10 +618,11 @@ def generate_video_core(request_dict):
         final_clip.close()
         for c in clips:
             c.close()
-        cleanup_files(temp_files)
+        # (Removed final video subtitle overlay; only per-scene subtitles are supported now)
         return {"download_url": f"/download/{os.path.basename(output_path)}"}
     except Exception as e:
         cleanup_files(temp_files)
+        logger.error(f"[task_id={task_id}] Video generation failed: {e}")
         raise
 
 API_KEY = "N8S6R_TydmHr58LoUzYZf9v2gRkcfWZemz1zWZ5WMkE"  # Change this to your actual secret key

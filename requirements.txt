@@ -10,4 +10,5 @@ torch
 torchaudio
 chatterbox-tts
 openai-whisper
-transformers 
+transformers
+openai 
