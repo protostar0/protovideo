@@ -4,15 +4,18 @@ import os
 import time
 
 def generate_image_from_prompt(prompt, api_key, out_path="generated_image.png", retries=3, delay=5):
+    """
+    Generate an image from a text prompt using OpenAI's API and save it to out_path.
+    Retries on failure.
+    """
     openai.api_key = api_key
-
     last_exception = None
     for attempt in range(retries):
         try:
             response = openai.Image.create(
                 prompt=prompt,
                 n=1,
-                size="1024x1024" #1080, 1920
+                size="1024x1024"
             )
             image_url = response['data'][0]['url']
             img_data = requests.get(image_url).content
@@ -29,7 +32,7 @@ def generate_image_from_prompt(prompt, api_key, out_path="generated_image.png", 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python generate_image.py 'your prompt here' [output_path]")
+        print("Usage: python -m video_generator.generate_image 'your prompt here' [output_path]")
         exit(1)
     prompt = sys.argv[1]
     out_path = sys.argv[2] if len(sys.argv) > 2 else "generated_image.png"

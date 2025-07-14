@@ -95,18 +95,24 @@ def test_generate_tempimage_scene(tmp_path):
         "output_filename": "trading_motivation_shorts.mp4",
   "scenes": [
     {
-      "type": "image",               
+      "type": "image",  
+            "subtitle": True,
+             
       "image": "https://images.pexels.com/photos/30572214/pexels-photo-30572214.jpeg",
 
     #   "promptImage": "A thoughtful trader sitting alone in a dark room with charts dimly lit in the background",
       "narration_text": "Trading psychology is the invisible force behind every decision you make.",
-      "duration": 4
+      "duration": 4,
+            "subtitle": True,
+
     },
     {
       "type": "image","image": "https://images.pexels.com/photos/17977092/pexels-photo-17977092.jpeg",
     #   "promptImage": "A brain split between logic and emotion, overlaid on a financial market background",
       "narration_text": "Fear and greed can cloud your judgment. Recognize them, don’t suppress them.",
-      "duration": 5
+      "duration": 5,
+            "subtitle": True,
+
     },
     # {
     #   "type": "image",
@@ -142,7 +148,7 @@ def test_generate_tempimage_scene(tmp_path):
     assert download_response.status_code == 200
     assert download_response.headers["content-type"] == "video/mp4"
     # Save to temp file and check size
-    video_path = tmp_path / f"test_promptimage_video_{uuid.uuid4().hex}.mp4"
+    video_path = tmp_path / f"test_prompttmpimage_video_{uuid.uuid4().hex}.mp4"
     with open(video_path, "wb") as f:
         f.write(download_response.content)
     assert os.path.getsize(video_path) > 1000  # Should be a non-trivial file
@@ -214,10 +220,10 @@ def test_generate_promptimage_scene(tmp_path):
 
 # Note: For a full integration test, you would need to provide valid URLs or local files for image/video/audio assets.
 # This is a minimal set of tests for API structure and error handling. 
+# test_generate_promptimage_scene(Path("./results/"))
+
+
 test_generate_tempimage_scene(Path("./results/"))
-
-
-
 
 
 

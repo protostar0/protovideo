@@ -60,7 +60,9 @@ app.add_middleware(
 )
 
 TEMP_DIR = tempfile.gettempdir()
-OUTPUT_DIR = os.path.join(TEMP_DIR, "generated_videos")
+from video_generator.config import Config
+API_KEY = Config.API_KEY
+OUTPUT_DIR = Config.OUTPUT_DIR
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 REEL_SIZE = (1080, 1920)  # width, height for 9:16 aspect ratio
@@ -152,7 +154,7 @@ def cleanup_files(filepaths: List[str]):
             logger.warning(f"Failed to delete temp file {path}: {e}")
 
 from moviepy.video.fx import MultiplyColor
-from generate_image import generate_image_from_prompt
+from video_generator.image_utils import download_asset, generate_image_from_prompt
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from moviepy.audio.AudioClip import AudioClip, concatenate_audioclips
 import tqdm
@@ -172,173 +174,15 @@ tqdm.tqdm = DummyTqdm
 
 import gc
 
-def render_scene(scene: SceneInput, use_global_narration=False, task_id=None) -> (str, List[str]):
-    log_prefix = f"[task_id={task_id}] " if task_id else ""
-    logger.info(f"{log_prefix}Rendering scene: {scene}")
-    temp_files = []
-    video_clip = None
-    audio_clips = []
-    # Handle image or video
-    if scene.type == "image":
-        image_path = None
-        if scene.image:
-            image_path = download_asset(scene.image)
-            temp_files.append(image_path)
-            logger.info(f"{log_prefix}Added image from file: {image_path}")
-        elif scene.promptImage:
-            # Generate image from prompt using generate_image_from_prompt directly
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                logger.error(f"{log_prefix}OPENAI_API_KEY environment variable not set.")
-                raise HTTPException(status_code=500, detail="OPENAI_API_KEY environment variable not set.")
-            out_path = os.path.join(tempfile.gettempdir(), f"generated_{uuid.uuid4().hex}.png")
-            try:
-                image_path = generate_image_from_prompt(scene.promptImage, api_key, out_path)
-                temp_files.append(image_path)
-                logger.info(f"{log_prefix}Generated image from prompt: {image_path}")
-            except Exception as e:
-                logger.error(f"{log_prefix}Image generation failed: {e}")
-                raise HTTPException(status_code=500, detail=f"{log_prefix}Image generation failed: {e}")
-        else:
-            logger.error(f"{log_prefix}Image URL/path or promptImage required for image scene.")
-            raise HTTPException(status_code=400, detail=f"{log_prefix}Image URL/path or promptImage required for image scene.")
-        # --- Set duration from narration_text if present ---
-        narration_path = None
-        narration_duration = None
-        narration_audio = None
-        if not use_global_narration:
-            if scene.narration:
-                narration_path = download_asset(scene.narration)
-                temp_files.append(narration_path)
-                logger.info(f"{log_prefix}Added narration from file: {narration_path}")
-            elif scene.narration_text:
-                narration_path = generate_narration(scene.narration_text)
-                temp_files.append(narration_path)
-                logger.info(f"{log_prefix}Added narration from text: {narration_path}")
-                # Set duration to narration duration + 2s silence
-                narration_audio = AudioFileClip(narration_path)
-                silence = AudioClip(lambda t: 0, duration=1.5, fps=44100)
-                scene.duration = narration_audio.duration + 1.5
-        # If no narration_text, use provided duration
-        if not scene.narration_text:
-            duration = scene.duration
-        else:
-            duration = scene.duration
-        video_clip = ImageClip(image_path).with_duration(duration)
-        # Resize to fit REEL_SIZE, preserving aspect ratio (no cropping)
-        video_clip = video_clip.resized(height=REEL_SIZE[1])
-        if video_clip.w > REEL_SIZE[0]:
-            video_clip = video_clip.resized(width=REEL_SIZE[0])
-        # Apply Ken Burns (zoom-in) effect to the image only (before padding)
-        def zoom(t):
-            return 1.0 + 0.5 * (t / duration)
-        video_clip = video_clip.resized(zoom)
-        # Pad to REEL_SIZE (after zoom)
-        video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
-        logger.info(f"{log_prefix}Created ImageClip for {image_path} with REEL_SIZE, full image visible, and correct zoom-in effect")
-        # Darken the image for better text readability
-        video_clip = video_clip.with_effects([MultiplyColor(0.5)])
-        # Add subtitles for narration_text if present and subtitle is True
-        if scene.narration_text and narration_path and getattr(scene, 'subtitle', False):
-            try:
-                subtitle_clips = generate_whisper_phrase_subtitles(narration_path, video_clip, words_per_line=4, font_size=50)
-                video_clip = CompositeVideoClip([video_clip] + subtitle_clips)
-                logger.info(f"{log_prefix}Subtitles added for scene narration.")
-            except Exception as e:
-                logger.warning(f"{log_prefix}Subtitle generation failed for scene: {e}")
-        # Attach audio (narration + 2s silence) if narration_text
-        if scene.narration_text and narration_audio is not None:
-            full_audio = concatenate_audioclips([narration_audio, silence])
-            video_clip = video_clip.with_audio(full_audio)
-            narration_audio.close()
-    elif scene.type == "video":
-        if not scene.video:
-            logger.error(f"{log_prefix}Video URL/path required for video scene.")
-            raise HTTPException(status_code=400, detail=f"{log_prefix}Video URL/path required for video scene.")
-        video_path = download_asset(scene.video)
-        temp_files.append(video_path)
-        video_clip = VideoFileClip(video_path)
-        video_clip = video_clip.subclipped(0, min(scene.duration, video_clip.duration))
-        if scene.duration < video_clip.duration:
-            video_clip = video_clip.subclipped(0, scene.duration)
-        else:
-            video_clip = video_clip.with_duration(scene.duration)
-        video_clip = video_clip.resized(height=REEL_SIZE[1])
-        video_clip = video_clip.with_background_color(size=REEL_SIZE, color=(0,0,0), pos='center')
-        logger.info(f"{log_prefix}Created VideoFileClip for {video_path} with REEL_SIZE")
-        # Darken the video for better text readability
-        video_clip = video_clip.with_effects([MultiplyColor(0.5)])
-    else:
-        logger.error(f"{log_prefix}Unknown scene type: {scene.type}")
-        raise HTTPException(status_code=400, detail=f"{log_prefix}Unknown scene type: {scene.type}")
-    # Handle text overlay
-    if scene.text:
-        logger.info(f"{log_prefix}Adding text overlay: {scene.text.content}")
-        txt_clip = TextClip(
-            font="Arial.ttf",
-            text=scene.text.content,
-            font_size=scene.text.fontsize,
-            color=scene.text.color
-        ).with_duration(scene.duration)
-        if scene.text.position == "center":
-            txt_clip = txt_clip.with_position('center')
-        elif scene.text.position == "top":
-            txt_clip = txt_clip.with_position(('center', 'top'))
-        elif scene.text.position == "bottom":
-            txt_clip = txt_clip.with_position(('center', 'bottom'))
-        video_clip = CompositeVideoClip([video_clip, txt_clip])
-        logger.info(f"{log_prefix}Text overlay added.")
-    # Handle narration (skip if using global narration)
-    narration_path = None
-    if not use_global_narration:
-        if scene.narration:
-            narration_path = download_asset(scene.narration)
-            temp_files.append(narration_path)
-            logger.info(f"{log_prefix}Added narration from file: {narration_path}")
-        elif scene.narration_text:
-            narration_path = generate_narration(scene.narration_text)
-            temp_files.append(narration_path)
-            logger.info(f"{log_prefix}Added narration from text: {narration_path}")
-        if narration_path:
-            narration_clip = AudioFileClip(narration_path)
-            if narration_clip.duration < video_clip.duration:
-                silence = AudioClip(lambda t: 0, duration=video_clip.duration - narration_clip.duration)
-                narration_padded = CompositeAudioClip([
-                    narration_clip,
-                    silence.with_start(narration_clip.duration)
-                ])
-                narration_padded = narration_padded.with_duration(video_clip.duration)
-            else:
-                narration_padded = narration_clip.subclipped(0, video_clip.duration)
-            video_clip = video_clip.with_audio(narration_padded)
-    # Handle music
-    if scene.music:
-        music_path = download_asset(scene.music)
-        temp_files.append(music_path)
-        audio_clips.append(AudioFileClip(music_path).with_volume_scaled(0.3).with_duration(scene.duration))
-        logger.info(f"{log_prefix}Added background music: {music_path}")
-    # Mix audio
-    if audio_clips:
-        logger.info(f"{log_prefix}Mixing {len(audio_clips)} audio tracks for scene.")
-        composite_audio = CompositeAudioClip(audio_clips)
-        video_clip = video_clip.with_audio(composite_audio)
-    scene_output = os.path.join(TEMP_DIR, f"scene_{uuid.uuid4().hex}.mp4")
-    logger.info(f"{log_prefix}Exporting scene to {scene_output}")
-    video_clip.write_videofile(
-        scene_output,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        temp_audiofile=f"{scene_output}.temp_audio.m4a",
-        remove_temp=True,
-        logger=None
-    )
-    temp_files.append(scene_output)
-    video_clip.close()
-    del video_clip
-    gc.collect()  # Free memory after scene
-    logger.info(f"{log_prefix}Scene rendered and saved: {scene_output}")
-    return scene_output, temp_files
+# --- Imports ---
+from video_generator.generator import render_scene, SceneInput, TextOverlay
+from video_generator.image_utils import download_asset, generate_image_from_prompt
+from video_generator.audio_utils import generate_narration, generate_whisper_phrase_subtitles
+from video_generator.cleanup_utils import cleanup_files
+from video_generator.logging_utils import get_logger
+
+# Remove duplicate definitions of these functions/classes from main.py
+# Use the imported versions from the modules above
 
 # --- API Endpoint ---
 @app.post("/generate")
@@ -655,7 +499,8 @@ def generate_video_core(request_dict, task_id=None):
         logger.error(f"[task_id={task_id}] Video generation failed: {e}")
         raise
 
-API_KEY = "N8S6R_TydmHr58LoUzYZf9v2gRkcfWZemz1zWZ5WMkE"  # Change this to your actual secret key
+API_KEY = Config.API_KEY
+OUTPUT_DIR = Config.OUTPUT_DIR
 
 def require_api_key(request: Request):
     api_key = request.headers.get("x-api-key")
